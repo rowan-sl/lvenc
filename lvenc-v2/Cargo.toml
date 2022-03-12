@@ -1,0 +1,14 @@
+[package]
+name = "lvenc-v2"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+opencv = "0.63"
+image = "0.24"
+thiserror = "1.0"
+anyhow = "1.0.55"
+array2d = "0.2.1"
+bitvec = "1.0.0"
