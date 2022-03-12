@@ -9,6 +9,7 @@ extern crate thiserror;
 extern crate bitvec;
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::{hint::unreachable_unchecked, fs::OpenOptions};
 use std::time::Instant;
 use bitvec::prelude::*;
@@ -23,10 +24,30 @@ use utils::mat_to_image;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResCell {
     RGB(Rgb<u8>),
+    // SmallChange(u8, u8, u8),
     // pointer left or up (rgb contained is not used in serializing)
     PtrL(Rgb<u8>),
     PtrU(Rgb<u8>),
 }
+
+trait U8Diff {
+    fn diff(&self, other: u8) -> i16;
+}
+
+impl U8Diff for u8 {
+    fn diff(&self, other: u8) -> i16 {
+        (*self as i16) - (other as i16)
+    }
+}
+
+/// returns if the difference between two `Rgb` pixels is 'small' and not all non-zero
+pub fn pix_small_difference(px1: Rgb<u8>, px2: Rgb<u8>) -> bool {
+    const ACCEPTABLE: i16 = 15;// 4 bit + one for signedness
+    (px1.0[0].diff(px2.0[0]).abs() <= ACCEPTABLE && px1.0[1].diff(px2.0[1]).abs() <= ACCEPTABLE && px1.0[2].diff(px2.0[2]).abs() <= ACCEPTABLE)
+    &&
+    (px1.0[0] != 0 || px1.0[0] != 0 || px1.0[0] != 0)
+}
+
 
 pub fn display_stage_1(src: &Array2D<Option<ResCell>>) -> RgbImage {
     RgbImage::from_fn(src.num_columns() as u32, src.num_rows() as u32, |x, y| {
@@ -39,14 +60,14 @@ pub fn display_stage_1(src: &Array2D<Option<ResCell>>) -> RgbImage {
 }
 
 /// takes a opencv Mat image and converts it into a grid of ResCells, for later conversion
-pub fn seri_stage_1(frame: Mat) -> Result<Array2D<Option<ResCell>>> {
+pub fn seri_stage_1(frame: Mat, before_loc: PathBuf) -> Result<Array2D<Option<ResCell>>> {
     let size = frame.size()?;
     println!("{:?}", size);
     let mut res_arr =
         Array2D::<Option<ResCell>>::filled_with(None, size.height as usize, size.width as usize);
 
     let im = mat_to_image(&frame)?;
-    // im.save("before.png")?;
+    im.save(before_loc)?;
     println!("width: {}, height: {}", im.width(), im.height());
 
     'main: for (x, y, px) in im.enumerate_pixels() {
@@ -183,8 +204,32 @@ pub fn seri_stage_4(elems: Vec<ResCellRepeater>) -> Vec<u8> {
     bytes.into()
 }
 
-fn main() -> Result<()> {
-    let mut cap = VideoCapture::from_file("../salmon_cannon.mp4", cv::videoio::CAP_ANY).unwrap();
+fn test_for(vid: PathBuf, out_dir: &str) -> Result<()> {
+    let mut cap = VideoCapture::from_file(vid.to_str().unwrap(), cv::videoio::CAP_ANY)?;
+
+    let (before_img_path, stage_one_path, out_file) = {
+        let mut out_dir = PathBuf::from(out_dir);
+        out_dir.push(PathBuf::from(vid).file_name().unwrap());
+
+        if !out_dir.exists() {
+            std::fs::create_dir(&out_dir)?;
+        }
+
+        let mut before_img_path = out_dir.clone();
+        before_img_path.push("before.png");
+
+        let mut stage_one_path = out_dir.clone();
+        stage_one_path.push("out.bmp");
+
+        let mut out_file = out_dir.clone();
+        out_file.push("out.bin");
+
+        (
+            before_img_path,
+            stage_one_path,
+            out_file,
+        )
+    };
 
     let mut frame = Mat::default();
 
@@ -193,19 +238,54 @@ fn main() -> Result<()> {
 
     
     let b = Instant::now();
-    let pt1 = seri_stage_1(frame)?;
-    // display_stage_1(&pt1).save("out.bmp")?;
+    let pt1 = seri_stage_1(frame, before_img_path)?;
+    display_stage_1(&pt1).save(stage_one_path)?;
     let pt2 = seri_stage_2(pt1);
     let pt3 = seri_stage_3(pt2);
+
+    let mut last = None;
+    let mut small = 0;
+    let mut large = 0;
+    for elem in &pt3 {
+        match last {
+            None => last = Some(*elem),
+            Some(last_val) => {
+                let vals = match (*elem, last_val) {
+                    (ResCellRepeater::Item(ResCell::RGB(rgb1)), ResCellRepeater::Item(ResCell::RGB(rgb2))) => (rgb1, rgb2),
+                    _ => continue
+                };
+
+                if pix_small_difference(vals.0, vals.1) {
+                    // println!("{} {} {}", vals.0[0].diff(vals.1[0]), vals.0[1].diff(vals.1[1]), vals.0[2].diff(vals.1[2]));
+                    small += 1;
+                } else {
+                    large += 1;
+                }
+                
+                last = Some(*elem);
+            }
+        }
+    }
+    println!("small differences: {}, large differences {}\nratio of small:large is {}", small, large, small as f64 / large as f64);
+
     let pt4 = seri_stage_4(pt3);
     println!("Serialization pt 1 took {:?}", Instant::now()-b);
 
-    OpenOptions::new().create(true).write(true).open("out.bin")?.write_all(&pt4)?;
+    OpenOptions::new().create(true).write(true).open(out_file)?.write_all(&pt4)?;
 
     println!(
         "minimum time to do one frame at 60fps is {}ms",
         1f64 / 60f64 * 1000f64
     );
 
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    for source_video in std::fs::read_dir("videos")? {
+        let path = source_video?.path();
+        println!("\n\ntesting video {}", path.display());
+        test_for(path, "out")?;
+    }
     Ok(())
 }
