@@ -496,6 +496,7 @@ dependencies = [
  "array2d",
  "bitvec 1.0.0",
  "image 0.24.1",
+ "most-squares",
  "opencv 0.63.0",
  "thiserror",
 ]
@@ -547,6 +548,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2b29bd4bc3f33391105ebee3589c19197c4271e3e5a9ec9bfe8127eeff8f082"
 dependencies = [
  "adler",
+]
+
+[[package]]
+name = "most-squares"
+version = "0.1.0"
+dependencies = [
+ "image 0.24.1",
 ]
 
 [[package]]

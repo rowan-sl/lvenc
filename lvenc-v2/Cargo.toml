@@ -12,3 +12,4 @@ thiserror = "1.0"
 anyhow = "1.0.55"
 array2d = "0.2.1"
 bitvec = "1.0.0"
+most-squares = { path = "../../most-squares"}

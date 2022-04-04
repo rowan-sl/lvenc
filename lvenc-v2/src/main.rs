@@ -24,7 +24,6 @@ use utils::mat_to_image;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResCell {
     RGB(Rgb<u8>),
-    // SmallChange(u8, u8, u8),
     // pointer left or up (rgb contained is not used in serializing)
     PtrL(Rgb<u8>),
     PtrU(Rgb<u8>),
