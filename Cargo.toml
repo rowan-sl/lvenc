@@ -7,7 +7,7 @@ edition = "2021"
 
 [workspace]
 members = [
-    "lvenc-v2"
+     "lvenc"
 ]
 
 [dependencies]
@@ -19,6 +19,7 @@ bincode = "1.3.3"
 bytes = "1.1.0"
 bitvec = "0.22.3"
 array2d = "0.2.1"
+anyhow = "1.0.55"
 
 [dependencies.lvenc]
 path = "lvenc"
