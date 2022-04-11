@@ -1,14 +1,14 @@
 mod utils;
 
-use lvenc::*;
 use anyhow::Result;
 use cv::prelude::*;
 use cv::videoio::VideoCapture;
+use lvenc::*;
 // use image::{Rgb, RgbImage};
 use opencv as cv;
 // use std::io::Write;
 use std::path::PathBuf;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 // use std::fs::OpenOptions;
 use stati::prelude::*;
 use utils::mat_to_image;
@@ -120,7 +120,10 @@ pub fn test_full(vid: PathBuf) -> Result<()> {
     let mut decoder = Decoder::new();
 
     let mut bar_manager = stati::BarManager::new();
-    let mut encoding_progress = bar_manager.register(stati::bars::SimpleBar::new("Encoding video", num_frames as usize));
+    let mut encoding_progress = bar_manager.register(stati::bars::SimpleBar::new(
+        "Encoding video",
+        num_frames as usize,
+    ));
 
     let mut frame_n = 0usize;
     loop {
@@ -159,7 +162,9 @@ pub fn test_full(vid: PathBuf) -> Result<()> {
         }
         frame_n += 1;
         encoding_progress.bar().set_progress(frame_n);
-        encoding_progress.bar().set_name(format!("Encoding video {frame_n}/{num_frames}"));
+        encoding_progress
+            .bar()
+            .set_name(format!("Encoding video {frame_n}/{num_frames}"));
         bar_manager.print();
     }
 
@@ -172,7 +177,10 @@ pub fn test_full(vid: PathBuf) -> Result<()> {
     println!("total encoding time of {total_encoding_time:?}, min {shortest_individual_encoding_frametime:?}, max {longest_individual_encoding_frametime:?}, avg {average_encoding_time:?}");
     println!("total decoding time of {total_decoding_time:?}, min {shortest_individual_decoding_frametime:?}, max {longest_individual_decoding_frametime:?}, avg {average_decoding_time:?}");
     println!("maximum acceptable time to process one frame is aprox {max_time_per_frame:?}");
-    println!("original video size is {}, encoded size is {}", original_video_size, total_video_size);
+    println!(
+        "original video size is {}, encoded size is {}",
+        original_video_size, total_video_size
+    );
     println!("video stats:");
     println!("resolution {width}x{height} at {fps} fps");
     println!("video length: {video_length:?}");

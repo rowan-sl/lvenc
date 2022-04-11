@@ -1,17 +1,16 @@
-mod utils;
-mod packet;
-mod grid;
 mod decoder;
+mod grid;
+mod packet;
+mod utils;
 
 use std::mem::MaybeUninit;
 
 use bitvec::prelude::*;
-use image::{Rgb, RgbImage};
-use utils::*;
-use packet::*;
-use grid::Grid;
 pub use decoder::{Decoder, Ready};
-
+use grid::Grid;
+use image::{Rgb, RgbImage};
+use packet::*;
+use utils::*;
 
 ///& old encoding
 /// is rep
@@ -58,9 +57,18 @@ pub use decoder::{Decoder, Ready};
 #[allow(unused)]
 const SPEC: () = ();
 
-//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IntermediatePixelNonPointerOrSameAsLast {
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntermediatePixel {
+    Pointer {
+        /// 1 is up, 0 is left
+        direction: bool,
+        /// a pointer can however point to a SameAsLast
+        target: [u8; 3],
+    },
+    /// same as last may not point to a pointer, as that would be b a d, nor can it point to another SameAsLast,
+    /// but it kinda can since the SameAsLast is processed before the check happens
+    SameAsLast([u8; 3]),
     Pixel([u8; 3]),
     /// even though it is a i8, treat this as a i4. for qualification, use the [`pix_small_difference`] function
     SmallChange {
@@ -69,32 +77,15 @@ pub enum IntermediatePixelNonPointerOrSameAsLast {
     },
 }
 
-impl IntermediatePixelNonPointerOrSameAsLast {
+impl IntermediatePixel {
     pub fn into_inner(self) -> [u8; 3] {
         match self {
+            Self::SameAsLast(x) => x,
             Self::Pixel(x) => x,
             Self::SmallChange { new, .. } => new,
+            Self::Pointer { target, .. } => target,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IntermediatePixelNonPointer {
-    /// same as last may not point to a pointer, as that would be b a d, nor can it point to another SameAsLast,
-    /// but it kinda can since the SameAsLast is processed before the check happens
-    SameAsLast(IntermediatePixelNonPointerOrSameAsLast),
-    Other(IntermediatePixelNonPointerOrSameAsLast),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IntermediatePixel {
-    Pointer {
-        /// 1 is up, 0 is left
-        direction: bool,
-        /// a pointer can however point to a SameAsLast
-        target: IntermediatePixelNonPointer,
-    },
-    Other(IntermediatePixelNonPointer),
 }
 
 /// 1 is up, 0 is left
@@ -122,9 +113,7 @@ pub enum RepType {
 }
 
 impl RepType {
-    pub fn serialize(self) -> BitVec<u8, Lsb0> {
-        let mut res = BitVec::new();
-
+    pub fn serialize(self, res: &mut BitVec<u8, Lsb0>) {
         match self {
             Self::SameAsLast(num) => {
                 // res_type
@@ -138,7 +127,9 @@ impl RepType {
                 res.push(true);
                 res.push(false);
                 // number of pixels
-                res.extend_from_raw_slice(&[u8::try_from(pixels.len()).expect("pixels len must be less than 255")]);
+                res.extend_from_raw_slice(&[
+                    u8::try_from(pixels.len()).expect("pixels len must be less than 255")
+                ]);
                 // pixels
                 res.extend_from_raw_slice(&pixels.into_iter().flatten().collect::<Vec<u8>>());
             }
@@ -147,12 +138,18 @@ impl RepType {
                 res.push(false);
                 res.push(true);
                 // number of pixels
-                res.extend_from_raw_slice(&[u8::try_from(pixels.len()).expect("pixels len must be less than 255")]);
+                res.extend_from_raw_slice(&[
+                    u8::try_from(pixels.len()).expect("pixels len must be less than 255")
+                ]);
                 // pixels
 
-                pixels.into_iter().map(|i| { if i == [0; 3] {panic!()} else {i}}).flatten().for_each(|d_rgb| {
-                    serialize_i4(&mut res, d_rgb);
-                });
+                pixels
+                    .into_iter()
+                    .map(|i| if i == [0; 3] { panic!() } else { i })
+                    .flatten()
+                    .for_each(|d_rgb| {
+                        serialize_i4(res, d_rgb);
+                    });
             }
             Self::Pointer(ptr) => {
                 // res_type
@@ -172,116 +169,73 @@ impl RepType {
                         //type
                         res.push(true);
                         //num
-                        res.extend_from_raw_slice(
-                            &[u8::try_from(ptrs.len())
-                                .expect("Pointer vec len must be less than 255")],
-                        );
+                        res.extend_from_raw_slice(&[u8::try_from(ptrs.len())
+                            .expect("Pointer vec len must be less than 255")]);
                         //poiners
                         res.extend(ptrs);
                     }
                 }
             }
         }
-        res
     }
 }
 
-pub fn serialize_stage_0_new(
+pub unsafe fn serialize_stage_0(
     last_img: &RgbImage,
     img: &RgbImage,
-) -> Vec<IntermediatePixelNonPointerOrSameAsLast> {
-    img.clone().enumerate_pixels().zip(last_img.enumerate_pixels()).map(|((_, _, next), (_, _, last))| {
-        if pix_small_difference(*last, *next) {
-            IntermediatePixelNonPointerOrSameAsLast::SmallChange {
-                change: [
-                    i8::try_from(next.0[0] as i16 - last.0[0] as i16).unwrap(),
-                    i8::try_from(next.0[1] as i16 - last.0[1] as i16).unwrap(),
-                    i8::try_from(next.0[2] as i16 - last.0[2] as i16).unwrap(),
-                ],
-                new: next.0,
-            }
-        } else {
-            IntermediatePixelNonPointerOrSameAsLast::Pixel([
-                next.0[0], next.0[1], next.0[2],
-            ])
-        }
-    }).collect()
-}
-
-pub fn serialize_stage_1_new(
-    last: Option<Vec<IntermediatePixelNonPointerOrSameAsLast>>,
-    next: Vec<IntermediatePixelNonPointerOrSameAsLast>,
-) -> Vec<IntermediatePixelNonPointer> {
-    if let Some(last) = last {
-        last.into_iter().zip(next.into_iter()).map(|(l, n)| {
-            if l.clone().into_inner() == n.clone().into_inner() {
-                IntermediatePixelNonPointer::SameAsLast(l)
-            } else {
-                IntermediatePixelNonPointer::Other(n)
-            }
-        }).collect()
-    } else {
-        next.into_iter().map(|i| {
-            IntermediatePixelNonPointer::Other(i)
-        }).collect()
-    }
-}
-
-
-pub fn serialize_stage_2_new(
-    next: Vec<IntermediatePixelNonPointer>,
-    image_size: (usize, usize),
 ) -> Grid<IntermediatePixel> {
-    let mut next_grid = Grid::from_iter(image_size.0, image_size.1, next.into_iter()).unwrap();
-    let mut res_grid = Grid::<MaybeUninit<IntermediatePixel>>::filled_with_fn(image_size.0, image_size.1, || {MaybeUninit::uninit()});
+    let image_size = (img.width(), img.height());
+    let mut res = Grid::<MaybeUninit<IntermediatePixel>>::filled_with(image_size.0 as usize, image_size.1 as usize, MaybeUninit::uninit());
 
-    'pxl_loop: for (x, y, pixel) in next_grid.clone().into_row_major_iter() {
-        // println!("{} {}", x, y);
+    'pxl_loop: for ((x, y, next), (_, _, last)) in img.enumerate_pixels().zip(last_img.enumerate_pixels()) {
         for (o_x, o_y, i) in [(x.saturating_sub(1), y, 0), (x, y.saturating_sub(1), 1)] {
             if o_x == x && o_y == y {
                 continue;
             }
 
-            let at_other = next_grid.get(o_x, o_y);
+            let at_other = res.get_unchecked(o_x as usize, o_y as usize).assume_init();
 
-            let inner_at_other = match at_other.clone() {
-                IntermediatePixelNonPointer::SameAsLast(x) => x,
-                IntermediatePixelNonPointer::Other(x) => x,
-            };
-
-            let inner_at_this = match pixel.clone() {
-                IntermediatePixelNonPointer::SameAsLast(x) => x,
-                IntermediatePixelNonPointer::Other(x) => x,
-            };
-
-            if inner_at_other.into_inner() == inner_at_this.into_inner() {
-                res_grid
-                    .set(
-                        x,
-                        y,
-                        MaybeUninit::new(IntermediatePixel::Pointer {
-                            direction: i == 1,
-                            target: at_other,
-                        }),
-                    );
+            if at_other.into_inner() == next.0 {
+                res.set_unchecked(
+                    x as usize,
+                    y as usize,
+                    MaybeUninit::new(IntermediatePixel::Pointer {
+                        direction: i == 1,
+                        target: at_other.into_inner(),
+                    }),
+                );
                 continue 'pxl_loop;
             }
         }
 
-        res_grid
-            .set(x, y, MaybeUninit::new(IntermediatePixel::Other(pixel)));
-}
+        res.set_unchecked(x as usize, y as usize, MaybeUninit::new(
+            if *last == *next {
+                IntermediatePixel::SameAsLast(last.0)
+            } else {
+                if pix_small_difference(*last, *next) {
+                    IntermediatePixel::SmallChange {
+                        change: [
+                            (next.0[0] as i16 - last.0[0] as i16) as i8,
+                            (next.0[1] as i16 - last.0[1] as i16) as i8,
+                            (next.0[2] as i16 - last.0[2] as i16) as i8,
+                        ],
+                        new: next.0,
+                    }
+                } else {
+                    IntermediatePixel::Pixel([next.0[0], next.0[1], next.0[2]])
+                }
+            }
+        ));
+    }
 
-    res_grid.transform_into(|i| { unsafe { i.assume_init() } })
+    res.transform_into(|i| unsafe { i.assume_init() })
 }
 
 pub fn display_stage_2(stage_2: &Grid<IntermediatePixel>) -> RgbImage {
     RgbImage::from_fn(
         stage_2.width() as u32,
         stage_2.height() as u32,
-        |col, row| match stage_2
-            .get(row as usize, col as usize)
-        {
+        |col, row| match unsafe { stage_2.get_unchecked(row as usize, col as usize) } {
             IntermediatePixel::Pointer { direction, .. } => {
                 if direction {
                     Rgb([255, 0, 0])
@@ -289,43 +243,24 @@ pub fn display_stage_2(stage_2: &Grid<IntermediatePixel>) -> RgbImage {
                     Rgb([0, 0, 255])
                 }
             }
-            IntermediatePixel::Other(other) => match other {
-                IntermediatePixelNonPointer::SameAsLast(..) => Rgb([0, 255, 0]),
-                IntermediatePixelNonPointer::Other(pixel) => Rgb(pixel.into_inner()),
-            },
+            IntermediatePixel::SameAsLast(..) => Rgb([0, 255, 0]),
+            other => Rgb(other.into_inner()),
         },
     )
 }
 
-pub fn serialize_stage_3_new(
-    next: Grid<IntermediatePixel>
-) -> Vec<IntermediatePixel> {
-    next.into_vec()
-}
-
-pub fn serialize_stage_4(
-    stage_3: Vec<IntermediatePixel>
-) -> Vec<RepType> {
-    let mut iterator = stage_3.into_iter();
+pub fn serialize_stage_4(stage_3: Grid<IntermediatePixel>) -> Vec<u8> {
+    let mut iterator = stage_3.into_vec().into_iter();
     let mut current: RepType = match iterator.next().unwrap() {
-        IntermediatePixel::Other(other) => match other {
-            IntermediatePixelNonPointer::SameAsLast(..) => {
-                RepType::SameAsLast(1)
-            }
-            IntermediatePixelNonPointer::Other(pixel) => {
-                match pixel {
-                    IntermediatePixelNonPointerOrSameAsLast::Pixel(px) => {
-                        RepType::Pixels(vec![px])
-                    }
-                    IntermediatePixelNonPointerOrSameAsLast::SmallChange { change, .. } => {
-                        RepType::SmallChange(vec![change])
-                    }
-                }
-            }
+        IntermediatePixel::SameAsLast(..) => RepType::SameAsLast(1),
+        IntermediatePixel::Pixel(px) => RepType::Pixels(vec![px]),
+        IntermediatePixel::SmallChange { change, .. } => {
+            RepType::SmallChange(vec![change])
         }
-        IntermediatePixel::Pointer{..} => unreachable!()
+        IntermediatePixel::Pointer { .. } => unreachable!(),
     };
-    let mut res = vec![];
+
+    let mut ser = BitVec::<u8, Lsb0>::new();
 
     for i in iterator {
         match i {
@@ -335,30 +270,31 @@ pub fn serialize_stage_4(
                         Pointer::Repeat(ref mut count, ref c_dir) => {
                             if *c_dir == direction {
                                 if *count == u8::MAX {
-                                    res.push(current);
+                                    current.serialize(&mut ser);
                                     current = RepType::Pointer(Pointer::Repeat(1, direction));
                                 } else {
                                     *count += 1;
                                 }
                             } else {
+                                //TODO make this a real value
                                 if *count < 10 {
                                     // less than some ammount of repetitions, so it is better just to switch over to a series variant instead
                                     let mut ptrs = vec![];
-                                    for _  in 0..*count {
+                                    for _ in 0..*count {
                                         ptrs.push(*c_dir);
                                     }
                                     ptrs.push(direction);
                                     current = RepType::Pointer(Pointer::Series(ptrs));
                                 } else {
                                     // more than some ammount of reps, so it is better to make a new set of reps to go on with
-                                    res.push(current);
+                                    current.serialize(&mut ser);
                                     current = RepType::Pointer(Pointer::Repeat(1, direction));
                                 }
                             }
                         }
                         Pointer::Series(ref mut ptrs) => {
                             if ptrs.len() == 255 {
-                                res.push(current);
+                                current.serialize(&mut ser);
                                 current = RepType::Pointer(Pointer::Repeat(1, direction));
                             } else {
                                 ptrs.push(direction);
@@ -366,80 +302,61 @@ pub fn serialize_stage_4(
                         }
                     }
                 } else {
-                    res.push(current);
+                    current.serialize(&mut ser);
                     current = RepType::Pointer(Pointer::Repeat(1, direction));
                 }
             }
-            IntermediatePixel::Other(other) => match other {
-                IntermediatePixelNonPointer::SameAsLast(..) => {
-                    if let RepType::SameAsLast(ref mut count) = current {
-                        if *count == 255 {
-                            res.push(current);
-                            current = RepType::SameAsLast(1);
-                        } else {
-                            *count += 1;
-                        }
-                    } else {
-                        res.push(current);
+            IntermediatePixel::SameAsLast(..) => {
+                if let RepType::SameAsLast(ref mut count) = current {
+                    if *count == 255 {
+                        current.serialize(&mut ser);
                         current = RepType::SameAsLast(1);
+                    } else {
+                        *count += 1;
                     }
+                } else {
+                    current.serialize(&mut ser);
+                    current = RepType::SameAsLast(1);
                 }
-                IntermediatePixelNonPointer::Other(pixel_kind) => match pixel_kind {
-                    IntermediatePixelNonPointerOrSameAsLast::Pixel(pixel) => {
-                        if let RepType::Pixels(ref mut pixels) = current {
-                            if pixels.len() == 255 {
-                                res.push(current);
-                                current = RepType::Pixels(vec![pixel]);
-                            } else {
-                                pixels.push(pixel);
-                            }
-                        } else {
-                            res.push(current);
-                            current = RepType::Pixels(vec![pixel]);
-                        }
+            }
+            IntermediatePixel::Pixel(pixel) => {
+                if let RepType::Pixels(ref mut pixels) = current {
+                    if pixels.len() == 255 {
+                        current.serialize(&mut ser);
+                        current = RepType::Pixels(vec![pixel]);
+                    } else {
+                        pixels.push(pixel);
                     }
-                    IntermediatePixelNonPointerOrSameAsLast::SmallChange { change, .. } => {
-                        if let RepType::SmallChange(ref mut changes) = current {
-                            if changes.len() == 255 {
-                                res.push(current);
-                                current = RepType::SmallChange(vec![change]);
-                            } else {
-                                changes.push(change);
-                            }
-                        } else {
-                            res.push(current);
-                            current = RepType::SmallChange(vec![change]);
-                        }
+                } else {
+                    current.serialize(&mut ser);
+                    current = RepType::Pixels(vec![pixel]);
+                }
+            }
+            IntermediatePixel::SmallChange { change, .. } => {
+                if let RepType::SmallChange(ref mut changes) = current {
+                    if changes.len() == 255 {
+                        current.serialize(&mut ser);
+                        current = RepType::SmallChange(vec![change]);
+                    } else {
+                        changes.push(change);
                     }
+                } else {
+                    current.serialize(&mut ser);
+                    current = RepType::SmallChange(vec![change]);
                 }
             }
         }
     }
 
-    res.push(current);
-    res
+    current.serialize(&mut ser);
+    ser.into_vec()
 }
-
-
-pub fn serialize_stage_5(
-    stage_4: Vec<RepType>
-) -> Vec<u8> {
-    let mut res = BitVec::<u8, Lsb0>::new();
-    for i in stage_4 {
-        res.append(&mut i.serialize());
-    }
-    res.into_vec()
-}
-
-
 
 #[derive(Debug)]
 pub struct Encoder {
     /// number of bytes to send in a packet. if zero, a entire image of bytes will be sent in one go
     bytes_per_packet: usize,
     last_frame: RgbImage,
-    last_stage_0: Option<Vec<IntermediatePixelNonPointerOrSameAsLast>>,
-    frame_size: (u32, u32),
     pending_packets: Vec<Packet>,
 }
 
@@ -448,9 +365,12 @@ impl Encoder {
         Self {
             bytes_per_packet: 0,
             last_frame: RgbImage::from_pixel(width, height, Rgb([0; 3])),
-            last_stage_0: None,
-            frame_size: (width, height),
-            pending_packets: vec![Packet {metadata: PacketMetadata::Init { frame_size: (width, height) }, data: vec![]}]
+            pending_packets: vec![Packet {
+                metadata: PacketMetadata::Init {
+                    frame_size: (width, height),
+                },
+                data: vec![],
+            }],
         }
     }
 
@@ -459,28 +379,28 @@ impl Encoder {
     }
 
     pub fn encode_frame(&mut self, frame: RgbImage) {
-        let pt0 = serialize_stage_0_new(
-            &self.last_frame,
-            &frame,
-        );
+        let pt0 = unsafe { serialize_stage_0(&self.last_frame, &frame) };
         self.last_frame = frame;
-        let pt1 = serialize_stage_1_new(self.last_stage_0.take(), pt0.clone());
-        self.last_stage_0 = Some(pt0);
-        let pt2 = serialize_stage_2_new(pt1, (self.frame_size.0 as usize, self.frame_size.1 as usize));
 
-        let pt3 = serialize_stage_3_new(pt2.clone());
-        let pt4 = serialize_stage_4(pt3);
-        let serialized = serialize_stage_5(pt4);
+        let serialized = serialize_stage_4(pt0);
 
         if self.bytes_per_packet == 0 {
-            self.pending_packets.push(Packet { metadata: PacketMetadata::NewFrame(serialized.len()), data: serialized });
+            self.pending_packets.push(Packet {
+                metadata: PacketMetadata::NewFrame(serialized.len()),
+                data: serialized,
+            });
         } else {
             let mut iter = serialized.chunks(self.bytes_per_packet);
-            self.pending_packets.push(Packet { metadata: PacketMetadata::NewFrame(serialized.len()), data: iter.next().unwrap().to_vec() });
+            self.pending_packets.push(Packet {
+                metadata: PacketMetadata::NewFrame(serialized.len()),
+                data: iter.next().unwrap().to_vec(),
+            });
             for packet_data in iter {
-                self.pending_packets.push(Packet { metadata: PacketMetadata::FrameData, data: packet_data.to_vec() });
+                self.pending_packets.push(Packet {
+                    metadata: PacketMetadata::FrameData,
+                    data: packet_data.to_vec(),
+                });
             }
         }
     }
 }
-

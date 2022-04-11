@@ -1,5 +1,4 @@
-use std::cmp::{min, max};
-
+use std::cmp::{max, min};
 
 pub trait U8AbsDist {
     fn abs_dist(&self, other: u8) -> i16;

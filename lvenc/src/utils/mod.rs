@@ -1,17 +1,15 @@
 mod u8_util;
-pub use u8_util::*;
-use image::Rgb;
 use bitvec::prelude::*;
+use image::Rgb;
+pub use u8_util::*;
 
-
-/// returns if the difference between two `Rgb` pixels is 'small' and not all non-zero
+/// returns if the difference between two `Rgb` pixels is 'small'
 pub fn pix_small_difference(px1: Rgb<u8>, px2: Rgb<u8>) -> bool {
     // 1 + 2 + 4 + 8 = 15
     const ACCEPTABLE: i16 = 15; // 4 bit + one for signedness
     px1.0[0].abs_dist(px2.0[0]) <= ACCEPTABLE
-    && px1.0[1].abs_dist(px2.0[1]) <= ACCEPTABLE
-    && px1.0[2].abs_dist(px2.0[2]) <= ACCEPTABLE
-    && px1 != px2
+        && px1.0[1].abs_dist(px2.0[1]) <= ACCEPTABLE
+        && px1.0[2].abs_dist(px2.0[2]) <= ACCEPTABLE
 }
 
 #[test]
@@ -63,19 +61,13 @@ fn test_set_bit() {
     assert_eq!(0, byte);
 }
 
-pub fn collect_byte(iter: &mut bitvec::boxed::IntoIter<u8, Lsb0>) -> Option<u8> {
-    if iter.len() < 8 {
-        return None;
-    }
-    let mut bits = vec![];
-    for _ in 0..8 {
-        bits.push(iter.next().unwrap());
-    }
+pub unsafe fn collect_byte(iter: &mut bitvec::boxed::IntoIter<u8, Lsb0>) -> u8 {
+    debug_assert!(iter.len() < 8);
     let mut res = 0u8;
-    for (i, b) in bits.into_iter().enumerate() {
-        set_bit(&mut res, i as u8, b);
+    for i in 0u8..8u8 {
+        set_bit(&mut res, i, iter.next().unwrap_unchecked());
     }
-    Some(res)
+    res
 }
 
 #[test]
@@ -85,31 +77,28 @@ fn test_collect_byte() {
     vec.extend_from_raw_slice(&[126u8]);
     dbg!(&vec);
     let mut iter = vec.into_iter();
-    assert_eq!(Some(249), collect_byte(&mut iter));
-    assert_eq!(Some(126), collect_byte(&mut iter));
+    unsafe {
+        assert_eq!(249, collect_byte(&mut iter));
+        assert_eq!(126, collect_byte(&mut iter));
+    }
 }
 
-pub fn collect_i4(iter: &mut bitvec::boxed::IntoIter<u8, Lsb0>) -> Option<i8> {
-    if iter.len() < 5 {
-        return None;
-    }
-    let mut bits = vec![];
-    let is_neg = iter.next().unwrap();
-    for _ in 0..4 {
-        bits.push(iter.next().unwrap());
-    }
+pub unsafe fn collect_i4(iter: &mut bitvec::boxed::IntoIter<u8, Lsb0>) -> i8 {
+    debug_assert!(iter.len() < 5);
     let mut res = 0u8;
-    for (i, b) in bits.into_iter().enumerate() {
-        set_bit(&mut res, i as u8, b);
+    let is_neg = iter.next().unwrap_unchecked();
+    for i in 0u8..4u8 {
+        set_bit(&mut res, i, iter.next().unwrap_unchecked());
     }
-    let mut signed_res = i8::try_from(/* TODO please god no please god why */if is_neg {16 - res} else {res}).unwrap();
+    let mut signed_res = /* TODO please god no please god why */ if is_neg { 16 - res } else { res } as i8;
     if is_neg {
         signed_res = -signed_res;
     }
-    Some(signed_res)
+    signed_res
 }
 
 pub fn serialize_i4(target: &mut BitVec<u8, Lsb0>, x: i8) {
+    target.reserve(5);
     target.push(x.is_negative());
     for i in 0u8..4u8 {
         target.push(bit(x as u8, i));
@@ -124,7 +113,7 @@ fn test_i4_encoding() {
         let mut bv = BitVec::<u8, Lsb0>::new();
         serialize_i4(&mut bv, i);
         // assert_eq!(Some(i), collect_i4(&mut bv.into_iter()));
-        let collected = collect_i4(&mut bv.into_iter()).unwrap();
+        let collected = unsafe { collect_i4(&mut bv.into_iter()) };
         if i != collected {
             fail = true;
             println!("Fail: {} != {}", i, collected);
