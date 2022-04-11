@@ -2,7 +2,6 @@ mod utils;
 
 use lvenc::*;
 use anyhow::Result;
-use bitvec::prelude::*;
 use cv::prelude::*;
 use cv::videoio::VideoCapture;
 use image::{Rgb, RgbImage};
@@ -15,10 +14,6 @@ use stati::prelude::*;
 use utils::mat_to_image;
 
 fn main() -> Result<()> {
-    // println!("{:?}", (-1i8).to_le_bytes().view_bits::<Lsb0>());
-    let mut bv = BitVec::<u8, Lsb0>::new();
-    serialize_i4(&mut bv, -1);
-    assert_eq!(Some(-1), collect_i4(&mut bv.into_iter()));
     for source_video in std::fs::read_dir("videos")? {
         let path = source_video?.path();
         println!("\n\ntesting video {}", path.display());

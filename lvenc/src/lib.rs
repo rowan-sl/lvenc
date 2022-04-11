@@ -331,9 +331,9 @@ pub fn serialize_stage_0(
                     if pix_small_difference(last_pix, *pix) {
                         IntermediatePixelNonPointerOrSameAsLast::SmallChange {
                             change: [
-                                i8::try_from(last_pix.0[0] as i16 - pix.0[0] as i16).unwrap(),
-                                i8::try_from(last_pix.0[1] as i16 - pix.0[1] as i16).unwrap(),
-                                i8::try_from(last_pix.0[2] as i16 - pix.0[2] as i16).unwrap(),
+                                i8::try_from(pix.0[0] as i16 - last_pix.0[0] as i16).unwrap(),
+                                i8::try_from(pix.0[1] as i16 - last_pix.0[1] as i16).unwrap(),
+                                i8::try_from(pix.0[2] as i16 - last_pix.0[2] as i16).unwrap(),
                             ],
                             new: pix.0,
                         }
@@ -786,7 +786,7 @@ impl Decoder {
                         }
                         SingleRepType::SmallChange(change) => {
                             let at = frame.get_pixel_mut(col as u32, row as u32);
-                            println!("{:?} + {:?}", at.0, change);
+                            // println!("{:?} + {:?}", at.0, change);
                             at.0[0] = u8::try_from(i16::from(at.0[0]) + i16::from(change[0])).unwrap();
                             at.0[1] = u8::try_from(i16::from(at.0[1]) + i16::from(change[1])).unwrap();
                             at.0[2] = u8::try_from(i16::from(at.0[2]) + i16::from(change[2])).unwrap();
