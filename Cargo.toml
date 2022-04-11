@@ -15,7 +15,6 @@ opencv = "0.63"
 image = "0.24"
 thiserror = "1.0"
 anyhow = "1.0.55"
-array2d = "0.2.1"
 bitvec = "1.0"
 serde = {version="1.0", features=["derive"]}
 shrinkwraprs = "0.3.0"
@@ -33,3 +32,4 @@ opt-level = 1
 # debug = true
 strip = true
 lto = true
+codegen-units = 1

@@ -1,140 +1,62 @@
 mod utils;
+mod packet;
+mod grid;
+mod decoder;
 
-use array2d::Array2D;
+use std::mem::MaybeUninit;
+
 use bitvec::prelude::*;
 use image::{Rgb, RgbImage};
 use utils::*;
+use packet::*;
+use grid::Grid;
+pub use decoder::{Decoder, Ready};
 
-/// returns if the difference between two `Rgb` pixels is 'small' and not all non-zero
-fn pix_small_difference(px1: Rgb<u8>, px2: Rgb<u8>) -> bool {
-    // 1 + 2 + 4 + 8 = 15
-    const ACCEPTABLE: i16 = 15; // 4 bit + one for signedness
-    px1.0[0].abs_dist(px2.0[0]) <= ACCEPTABLE
-    && px1.0[1].abs_dist(px2.0[1]) <= ACCEPTABLE
-    && px1.0[2].abs_dist(px2.0[2]) <= ACCEPTABLE
-    && px1 != px2
-}
 
-#[test]
-fn test_pix_small_diff() {
-    let px1 = Rgb([10, 21, 100]);
-    let px2 = Rgb([25, 20, 100]);
-    assert!(pix_small_difference(px1, px2));
-    let px1 = Rgb([10, 21, 255]);
-    let px2 = Rgb([10, 21, 255]);
-    assert!(!pix_small_difference(px1, px2));
-    let px1 = Rgb([10, 21, 116]);
-    let px2 = Rgb([25, 20, 100]);
-    assert!(!pix_small_difference(px1, px2));
-}
-
-/// get the bit at the provided index
+///& old encoding
+/// is rep
+///     n -> is ptr
+///         n -> encoded rgb [u8; 3]
+///         y -> left or right
+///             l -> 0
+///             r -> 1
+///     y -> max num reps?
+///         n -> num reps (u8), item (see first branch)
+///         y -> item (see first branch)
 ///
-/// bit 0 is least significant, bit 7 is most significant
-pub const fn bit(byte: u8, bit: u8) -> bool {
-    debug_assert!(bit <= 7);
-    byte >> bit & 1 == 1
-}
-
-#[test]
-fn test_get_bit() {
-    let byte = 1u8;
-    let bit_val = bit(byte, 0);
-    assert_eq!(true, bit_val);
-}
-
-/// sets the bit at the provided index
+///& new encoding:
+/// reps here are specified before a series of pixels,
+/// and the number of folowing pixels are always specified (or max)
+/// so it might say `the next 143 pixels are all repetitions of this one pixel` and then specify the pixel,
+/// or it could say `these next 120 pixels are all the same as in the last image` and then specify nothing.
+/// weather it is a rep or not is not specified, as the first data will be the repetition type and after the num of pixels specified, the type data will occur again
 ///
-/// bit 0 is least significant, bit 7 is most significant
-fn set_bit(byte: &mut u8, bit_id: u8, bit_v: bool) {
-    debug_assert!(bit_id <= 7);
-    // dbg!(&byte);
-    *byte &= (1 >> bit_id) ^ u8::MAX;
-    // dbg!(&byte);
-    if bit_v {
-        *byte |= 1 << bit_id;
-    }
-    // dbg!(&byte);
-}
-
-#[test]
-fn test_set_bit() {
-    let mut byte = 1u8;
-    set_bit(&mut byte, 0, false);
-    assert_eq!(0, byte);
-}
-
-fn collect_byte(iter: &mut bitvec::boxed::IntoIter<u8, Lsb0>) -> Option<u8> {
-    if iter.len() < 8 {
-        return None;
-    }
-    let mut bits = vec![];
-    for _ in 0..8 {
-        bits.push(iter.next().unwrap());
-    }
-    let mut res = 0u8;
-    for (i, b) in bits.into_iter().enumerate() {
-        set_bit(&mut res, i as u8, b);
-    }
-    Some(res)
-}
-
-#[test]
-fn test_collect_byte() {
-    let mut vec = BitVec::<u8, Lsb0>::new();
-    vec.extend_from_raw_slice(&[249u8]);
-    vec.extend_from_raw_slice(&[126u8]);
-    dbg!(&vec);
-    let mut iter = vec.into_iter();
-    assert_eq!(Some(249), collect_byte(&mut iter));
-    assert_eq!(Some(126), collect_byte(&mut iter));
-}
-
-pub fn collect_i4(iter: &mut bitvec::boxed::IntoIter<u8, Lsb0>) -> Option<i8> {
-    if iter.len() < 5 {
-        return None;
-    }
-    let mut bits = vec![];
-    let is_neg = iter.next().unwrap();
-    for _ in 0..4 {
-        bits.push(iter.next().unwrap());
-    }
-    let mut res = 0u8;
-    for (i, b) in bits.into_iter().enumerate() {
-        set_bit(&mut res, i as u8, b);
-    }
-    let mut signed_res = i8::try_from(/* TODO please god no please god why */if is_neg {16 - res} else {res}).unwrap();
-    if is_neg {
-        signed_res = -signed_res;
-    }
-    Some(signed_res)
-}
-
-pub fn serialize_i4(target: &mut BitVec<u8, Lsb0>, x: i8) {
-    target.push(x.is_negative());
-    for i in 0u8..4u8 {
-        target.push(bit(x as u8, i));
-    }
-}
-
-#[test]
-fn test_i4_encoding() {
-    let mut fail = false;
-    for i in -15i8..=15i8 {
-        println!("testing {i}");
-        let mut bv = BitVec::<u8, Lsb0>::new();
-        serialize_i4(&mut bv, i);
-        // assert_eq!(Some(i), collect_i4(&mut bv.into_iter()));
-        let collected = collect_i4(&mut bv.into_iter()).unwrap();
-        if i != collected {
-            fail = true;
-            println!("Fail: {} != {}", i, collected);
-        }
-    }
-    if fail {
-        panic!("Failed");
-    }
-}
+/// TODO add test cases for weather different things increase encoding size
+///
+/// ! note that for pointers, they are stored as a bool, with 1 being up and 0 being left
+///
+/// rep_type(u2):
+///     same_as_last(num: u8,) /* same pixel as last image, if there was no last image, assume that it was entierly made of black pixels
+///                                this is generic over every single other pixel type except iself, so when encoding it should be treated as so,
+///                                added in as part of the last step, and compared to the previous image right before the last step. */
+///     pixels(num: u8,) /* folowed by `num` pixels ([u8; 3]) */
+///     small_change(num: u8,) /* folowed by `num` small scale pixel changes ([i4; 3] vs [u8; 3] or 15 bits vs 24 bits).
+///                                 if this is applicable can be determined using the `pix_small_difference` function
+///                                 i4 is represented as (sign + first 4 bits of i8 as u8*/
+///     pointer(type: u1): /* pointer to another pixel, type determines the folowing variant */
+///         repeat(num: u8, direction: u1,) /* `num` repetitions of pointer `direction` */
+///         series(num: u8,) /* folowed by [u1; `num`] pointers */
+///
+/// Encoding steps:
+///
+/// start out with a RgbImage, and convert to a 2DArray of `IntermediatePixelNonPointerOrSameAsLast`
+/// then, conver to `IntermediatePixelNonPointer`, and finally conver to `IntermediatePixel`
+///
+/// at this step, flatten the array into a vector, and convert the `IntermediatePixel`s into a vector of `RepType`
+/// then, use RepType::serialize() to convert to bytes
+///
+#[allow(unused)]
+const SPEC: () = ();
 
 //AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,188 +186,101 @@ impl RepType {
     }
 }
 
-///& old encoding
-/// is rep
-///     n -> is ptr
-///         n -> encoded rgb [u8; 3]
-///         y -> left or right
-///             l -> 0
-///             r -> 1
-///     y -> max num reps?
-///         n -> num reps (u8), item (see first branch)
-///         y -> item (see first branch)
-///
-///& new encoding:
-/// reps here are specified before a series of pixels,
-/// and the number of folowing pixels are always specified (or max)
-/// so it might say `the next 143 pixels are all repetitions of this one pixel` and then specify the pixel,
-/// or it could say `these next 120 pixels are all the same as in the last image` and then specify nothing.
-/// weather it is a rep or not is not specified, as the first data will be the repetition type and after the num of pixels specified, the type data will occur again
-///
-/// TODO add test cases for weather different things increase encoding size
-/// TODO add fourth case to repr_type, as there is one more option available
-///
-/// ! note that for pointers, they are stored as a bool, with 1 being up and 0 being left
-///
-/// rep_type(u2):
-///     same_as_last(num: u8,) /* same pixel as last image, if there was no last image, assume that it was entierly made of black pixels
-///                                this is generic over every single other pixel type except iself, so when encoding it should be treated as so,
-///                                added in as part of the last step, and compared to the previous image right before the last step. */
-///     pixels(num: u8,) /* folowed by `num` pixels ([u8; 3]) */
-///     small_change(num: u8,) /* folowed by `num` small scale pixel changes ([i4; 3] vs [u8; 3] or 15 bits vs 24 bits).
-///                                 if this is applicable can be determined using the `pix_small_difference` function
-///                                 i4 is represented as (sign + first 4 bits of i8 as u8*/
-///     pointer(type: u1): /* pointer to another pixel, type determines the folowing variant */
-///         repeat(num: u8, direction: u1,) /* `num` repetitions of pointer `direction` */
-///         series(num: u8,) /* folowed by [u1; `num`] pointers */
-///
-/// Encoding steps:
-///
-/// start out with a RgbImage, and convert to a 2DArray of `IntermediatePixelNonPointerOrSameAsLast`
-/// then, conver to `IntermediatePixelNonPointer`, and finally conver to `IntermediatePixel`
-///
-/// at this step, flatten the array into a vector, and convert the `IntermediatePixel`s into a vector of `RepType`
-/// then, use RepType::serialize() to convert to bytes
-///
-#[allow(unused)]
-const SPEC: () = ();
-
-pub fn serialize_stage_0(
+pub fn serialize_stage_0_new(
     last_img: &RgbImage,
     img: &RgbImage,
-) -> Array2D<Option<IntermediatePixelNonPointerOrSameAsLast>> {
-    let width = img.width();
-    let height = img.height();
-
-    let mut intermediate_arr: Array2D<Option<IntermediatePixelNonPointerOrSameAsLast>> =
-        Array2D::filled_with(None, height as usize, width as usize);
-
-    for (x, y, pix) in img.enumerate_pixels() {
-        let last_pix = *last_img.get_pixel(x, y);
-
-        intermediate_arr
-            .set(
-                y as usize,
-                x as usize,
-                Some({
-                    if pix_small_difference(last_pix, *pix) {
-                        IntermediatePixelNonPointerOrSameAsLast::SmallChange {
-                            change: [
-                                i8::try_from(pix.0[0] as i16 - last_pix.0[0] as i16).unwrap(),
-                                i8::try_from(pix.0[1] as i16 - last_pix.0[1] as i16).unwrap(),
-                                i8::try_from(pix.0[2] as i16 - last_pix.0[2] as i16).unwrap(),
-                            ],
-                            new: pix.0,
-                        }
-                    } else {
-                        IntermediatePixelNonPointerOrSameAsLast::Pixel([
-                            pix.0[0], pix.0[1], pix.0[2],
-                        ])
-                    }
-                }),
-            )
-            .unwrap();
-    }
-
-    intermediate_arr
-}
-
-pub fn serialize_stage_1(
-    last: Option<Array2D<Option<IntermediatePixelNonPointerOrSameAsLast>>>,
-    current: Array2D<Option<IntermediatePixelNonPointerOrSameAsLast>>,
-) -> Array2D<Option<IntermediatePixelNonPointer>> {
-    let mut intermediate_arr: Array2D<Option<IntermediatePixelNonPointer>> =
-        Array2D::filled_with(None, current.num_rows(), current.num_columns());
-
-    for col in 0..current.num_columns() {
-        for row in 0..current.num_rows() {
-            let at_current = current.get(row, col).unwrap().to_owned().unwrap();
-            if let Some(ref last_arr) = last {
-                let at_last = last_arr.get(row, col).unwrap().to_owned().unwrap();
-                if at_last == at_current {
-                    intermediate_arr
-                        .set(
-                            row,
-                            col,
-                            Some(IntermediatePixelNonPointer::SameAsLast(at_last)),
-                        )
-                        .unwrap();
-                    continue;
-                }
+) -> Vec<IntermediatePixelNonPointerOrSameAsLast> {
+    img.clone().enumerate_pixels().zip(last_img.enumerate_pixels()).map(|((_, _, next), (_, _, last))| {
+        if pix_small_difference(*last, *next) {
+            IntermediatePixelNonPointerOrSameAsLast::SmallChange {
+                change: [
+                    i8::try_from(next.0[0] as i16 - last.0[0] as i16).unwrap(),
+                    i8::try_from(next.0[1] as i16 - last.0[1] as i16).unwrap(),
+                    i8::try_from(next.0[2] as i16 - last.0[2] as i16).unwrap(),
+                ],
+                new: next.0,
             }
-            intermediate_arr
-                .set(
-                    row,
-                    col,
-                    Some(IntermediatePixelNonPointer::Other(at_current)),
-                )
-                .unwrap();
+        } else {
+            IntermediatePixelNonPointerOrSameAsLast::Pixel([
+                next.0[0], next.0[1], next.0[2],
+            ])
         }
-    }
-
-    intermediate_arr
+    }).collect()
 }
 
-pub fn serialize_stage_2(
-    current: Array2D<Option<IntermediatePixelNonPointer>>,
-) -> Array2D<Option<IntermediatePixel>> {
-    let mut intermediate_arr: Array2D<Option<IntermediatePixel>> =
-        Array2D::filled_with(None, current.num_rows(), current.num_columns());
+pub fn serialize_stage_1_new(
+    last: Option<Vec<IntermediatePixelNonPointerOrSameAsLast>>,
+    next: Vec<IntermediatePixelNonPointerOrSameAsLast>,
+) -> Vec<IntermediatePixelNonPointer> {
+    if let Some(last) = last {
+        last.into_iter().zip(next.into_iter()).map(|(l, n)| {
+            if l.clone().into_inner() == n.clone().into_inner() {
+                IntermediatePixelNonPointer::SameAsLast(l)
+            } else {
+                IntermediatePixelNonPointer::Other(n)
+            }
+        }).collect()
+    } else {
+        next.into_iter().map(|i| {
+            IntermediatePixelNonPointer::Other(i)
+        }).collect()
+    }
+}
 
-    for (y, rows) in current.rows_iter().enumerate() {
-        'pxl_loop: for (x, pixel_wapper) in rows.enumerate() {
-            let pixel = pixel_wapper.to_owned().unwrap();
 
-            for (o_x, o_y, i) in [(x.saturating_sub(1), y, 0), (x, y.saturating_sub(1), 1)] {
-                if o_x == x && o_y == y {
-                    continue;
-                }
+pub fn serialize_stage_2_new(
+    next: Vec<IntermediatePixelNonPointer>,
+    image_size: (usize, usize),
+) -> Grid<IntermediatePixel> {
+    let mut next_grid = Grid::from_iter(image_size.0, image_size.1, next.into_iter()).unwrap();
+    let mut res_grid = Grid::<MaybeUninit<IntermediatePixel>>::filled_with_fn(image_size.0, image_size.1, || {MaybeUninit::uninit()});
 
-                let at_other = current.get(o_y, o_x).unwrap().to_owned().unwrap();
-
-                let inner_at_other = match at_other.clone() {
-                    IntermediatePixelNonPointer::SameAsLast(x) => x,
-                    IntermediatePixelNonPointer::Other(x) => x,
-                };
-
-                let inner_at_this = match pixel.clone() {
-                    IntermediatePixelNonPointer::SameAsLast(x) => x,
-                    IntermediatePixelNonPointer::Other(x) => x,
-                };
-
-                if inner_at_other.into_inner() == inner_at_this.into_inner() {
-                    intermediate_arr
-                        .set(
-                            y,
-                            x,
-                            Some(IntermediatePixel::Pointer {
-                                direction: i == 1,
-                                target: at_other,
-                            }),
-                        )
-                        .unwrap();
-                    continue 'pxl_loop;
-                }
+    'pxl_loop: for (x, y, pixel) in next_grid.clone().into_row_major_iter() {
+        // println!("{} {}", x, y);
+        for (o_x, o_y, i) in [(x.saturating_sub(1), y, 0), (x, y.saturating_sub(1), 1)] {
+            if o_x == x && o_y == y {
+                continue;
             }
 
-            intermediate_arr
-                .set(y, x, Some(IntermediatePixel::Other(pixel)))
-                .unwrap();
-        }
-    }
+            let at_other = next_grid.get(o_x, o_y);
 
-    intermediate_arr
+            let inner_at_other = match at_other.clone() {
+                IntermediatePixelNonPointer::SameAsLast(x) => x,
+                IntermediatePixelNonPointer::Other(x) => x,
+            };
+
+            let inner_at_this = match pixel.clone() {
+                IntermediatePixelNonPointer::SameAsLast(x) => x,
+                IntermediatePixelNonPointer::Other(x) => x,
+            };
+
+            if inner_at_other.into_inner() == inner_at_this.into_inner() {
+                res_grid
+                    .set(
+                        x,
+                        y,
+                        MaybeUninit::new(IntermediatePixel::Pointer {
+                            direction: i == 1,
+                            target: at_other,
+                        }),
+                    );
+                continue 'pxl_loop;
+            }
+        }
+
+        res_grid
+            .set(x, y, MaybeUninit::new(IntermediatePixel::Other(pixel)));
 }
 
-pub fn display_stage_2(stage_2: &Array2D<Option<IntermediatePixel>>) -> RgbImage {
+    res_grid.transform_into(|i| { unsafe { i.assume_init() } })
+}
+
+pub fn display_stage_2(stage_2: &Grid<IntermediatePixel>) -> RgbImage {
     RgbImage::from_fn(
-        stage_2.num_columns() as u32,
-        stage_2.num_rows() as u32,
+        stage_2.width() as u32,
+        stage_2.height() as u32,
         |col, row| match stage_2
             .get(row as usize, col as usize)
-            .unwrap()
-            .to_owned()
-            .unwrap()
         {
             IntermediatePixel::Pointer { direction, .. } => {
                 if direction {
@@ -462,14 +297,10 @@ pub fn display_stage_2(stage_2: &Array2D<Option<IntermediatePixel>>) -> RgbImage
     )
 }
 
-pub fn serialize_stage_3(
-    stage_2: Array2D<Option<IntermediatePixel>>
+pub fn serialize_stage_3_new(
+    next: Grid<IntermediatePixel>
 ) -> Vec<IntermediatePixel> {
-    stage_2.elements_row_major_iter()
-        .map(|i| {
-            i.to_owned().unwrap()
-        })
-        .collect()
+    next.into_vec()
 }
 
 pub fn serialize_stage_4(
@@ -589,6 +420,7 @@ pub fn serialize_stage_4(
     res
 }
 
+
 pub fn serialize_stage_5(
     stage_4: Vec<RepType>
 ) -> Vec<u8> {
@@ -600,31 +432,14 @@ pub fn serialize_stage_5(
 }
 
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum PacketMetadata {
-    /// data vector can be ignored, should be empty
-    Init {
-        /// width, height
-        frame_size: (u32, u32),
-    },
-    /// data vector includes some data, for the next frame.
-    NewFrame(usize/* amnt of bytes for the next frame */),
-    /// data vector includes some data
-    FrameData,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Packet {
-    metadata: PacketMetadata,
-    data: Vec<u8>,
-}
 
 #[derive(Debug)]
 pub struct Encoder {
     /// number of bytes to send in a packet. if zero, a entire image of bytes will be sent in one go
     bytes_per_packet: usize,
     last_frame: RgbImage,
-    last_stage_0: Option<Array2D<Option<IntermediatePixelNonPointerOrSameAsLast>>>,
+    last_stage_0: Option<Vec<IntermediatePixelNonPointerOrSameAsLast>>,
+    frame_size: (u32, u32),
     pending_packets: Vec<Packet>,
 }
 
@@ -634,6 +449,7 @@ impl Encoder {
             bytes_per_packet: 0,
             last_frame: RgbImage::from_pixel(width, height, Rgb([0; 3])),
             last_stage_0: None,
+            frame_size: (width, height),
             pending_packets: vec![Packet {metadata: PacketMetadata::Init { frame_size: (width, height) }, data: vec![]}]
         }
     }
@@ -643,16 +459,16 @@ impl Encoder {
     }
 
     pub fn encode_frame(&mut self, frame: RgbImage) {
-        let pt0 = serialize_stage_0(
+        let pt0 = serialize_stage_0_new(
             &self.last_frame,
             &frame,
         );
         self.last_frame = frame;
-        let pt1 = serialize_stage_1(self.last_stage_0.take(), pt0.clone());
+        let pt1 = serialize_stage_1_new(self.last_stage_0.take(), pt0.clone());
         self.last_stage_0 = Some(pt0);
-        let pt2 = serialize_stage_2(pt1);
+        let pt2 = serialize_stage_2_new(pt1, (self.frame_size.0 as usize, self.frame_size.1 as usize));
 
-        let pt3 = serialize_stage_3(pt2.clone());
+        let pt3 = serialize_stage_3_new(pt2.clone());
         let pt4 = serialize_stage_4(pt3);
         let serialized = serialize_stage_5(pt4);
 
@@ -668,182 +484,3 @@ impl Encoder {
     }
 }
 
-#[derive(Debug)]
-pub struct Decoder {
-    last_frame: Option<RgbImage>,
-    frame_size: Option<(u32, u32)>,
-    bytes_for_next_frame: Option<usize>,
-    pending_frame_data: Vec<u8>,
-    pending_frames: Vec<RgbImage>,
-}
-
-impl Decoder {
-    pub fn new() -> Self {
-        Self {
-            last_frame: None,
-            frame_size: None,
-            bytes_for_next_frame: None,
-            pending_frame_data: vec![],
-            pending_frames: vec![],
-        }
-    }
-
-    fn attempt_decode(&mut self) {
-        let bytes_for_next_frame = self.bytes_for_next_frame.unwrap();
-        if self.pending_frame_data.len() >= bytes_for_next_frame {
-            let mut frame_data = self.pending_frame_data.drain(0..bytes_for_next_frame).collect::<BitVec<u8, Lsb0>>().into_iter();
-            let mut decoded_reptypes: Vec<RepType> = vec![];
-
-            while frame_data.len() >= 8 {
-                // println!("{}", frame_data.len());
-                match (frame_data.next().unwrap(), frame_data.next().unwrap()) {
-                    (false, false) => {
-                        let num_of_same = collect_byte(&mut frame_data).unwrap();
-                        decoded_reptypes.push(RepType::SameAsLast(num_of_same));
-                    }
-                    (true, false) => {
-                        let mut pixels = vec![];
-                        for _ in 0..collect_byte(&mut frame_data).unwrap() {
-                            pixels.push([collect_byte(&mut frame_data).unwrap(), collect_byte(&mut frame_data).unwrap(), collect_byte(&mut frame_data).unwrap()]);
-                        }
-                        decoded_reptypes.push(RepType::Pixels(pixels));
-                    }
-                    (false, true) => {
-                        let mut changes = vec![];
-                        for _ in 0..collect_byte(&mut frame_data).unwrap() {
-                            changes.push([collect_i4(&mut frame_data).unwrap(), collect_i4(&mut frame_data).unwrap(), collect_i4(&mut frame_data).unwrap()]);
-                        }
-                        decoded_reptypes.push(RepType::SmallChange(changes));
-                    }
-                    (true, true) => {
-                        if frame_data.next().unwrap() {
-                            // series of different ptrs
-                            let mut ptrs = vec![];
-                            for _ in 0..collect_byte(&mut frame_data).unwrap() {
-                                ptrs.push(frame_data.next().unwrap());
-                            }
-                            decoded_reptypes.push(RepType::Pointer(Pointer::Series(ptrs)));
-                        } else {
-                            // repetition of one
-                            let count = collect_byte(&mut frame_data).unwrap();
-                            let direction = frame_data.next().unwrap();
-                            decoded_reptypes.push(RepType::Pointer(Pointer::Repeat(count, direction)));
-                        }
-                    }
-                }
-            }
-
-            let single_reptypes = Array2D::<SingleRepType>::from_iter_row_major(decoded_reptypes
-                .into_iter()
-                .map(|i| {
-                    match i {
-                        RepType::Pixels(pixels) => {
-                            pixels.into_iter().map(|i| {
-                                SingleRepType::Pixel(i)
-                            }).collect::<Vec<_>>()
-                        }
-                        RepType::SmallChange(changes) => {
-                            changes.into_iter().map(|i| {
-                                SingleRepType::SmallChange(i)
-                            }).collect::<Vec<_>>()
-                        }
-                        RepType::SameAsLast(num) => {
-                            std::iter::repeat(SingleRepType::SameAsLast).take(num as usize).collect::<Vec<_>>()
-                        }
-                        RepType::Pointer(ptr) => {
-                            match ptr {
-                                Pointer::Repeat(num, direction) => {
-                                    std::iter::repeat(SingleRepType::Pointer(direction)).take(num as usize).collect::<Vec<_>>()
-                                }
-                                Pointer::Series(ptrs) => {
-                                    ptrs.into_iter().map(|i| {
-                                        SingleRepType::Pointer(i)
-                                    }).collect::<Vec<_>>()
-                                }
-                            }
-                        }
-                    }
-                })
-                .flatten(),
-                self.frame_size.unwrap().1 as usize,
-                self.frame_size.unwrap().0 as usize,
-            );
-
-            let mut frame = self.last_frame.take().unwrap();
-
-            for (row, row_data) in single_reptypes.rows_iter().enumerate() {
-                for (col, reptype) in row_data.enumerate() {
-                    match *reptype {
-                        SingleRepType::Pixel(pixel) => {
-                            frame.get_pixel_mut(col as u32, row as u32).0 = pixel;
-                        }
-                        SingleRepType::Pointer(direction) => {
-                            *frame.get_pixel_mut(col as u32, row as u32) = if direction {
-                                *frame.get_pixel_mut(col as u32, row as u32 - 1)
-                            } else {
-                                *frame.get_pixel_mut(col as u32 - 1, row as u32)
-                            };
-                        }
-                        SingleRepType::SmallChange(change) => {
-                            let at = frame.get_pixel_mut(col as u32, row as u32);
-                            // println!("{:?} + {:?}", at.0, change);
-                            at.0[0] = u8::try_from(i16::from(at.0[0]) + i16::from(change[0])).unwrap();
-                            at.0[1] = u8::try_from(i16::from(at.0[1]) + i16::from(change[1])).unwrap();
-                            at.0[2] = u8::try_from(i16::from(at.0[2]) + i16::from(change[2])).unwrap();
-                        }
-                        SingleRepType::SameAsLast => {/* hehe */}
-                    }
-                }
-            }
-
-            self.last_frame = Some(frame.clone());
-            self.pending_frames.push(frame);
-            self.bytes_for_next_frame = None;
-        }
-    }
-
-    pub fn feed_packet(&mut self, packet: Packet) {
-        // TODO remove panics
-        match packet.metadata {
-            PacketMetadata::Init { frame_size } => {
-                self.frame_size = Some(frame_size);
-                self.last_frame = Some(RgbImage::from_pixel(frame_size.0, frame_size.1, Rgb([0; 3])));
-            }
-            PacketMetadata::NewFrame(num_bytes) => {
-                if let None = self.bytes_for_next_frame {
-                    self.bytes_for_next_frame = Some(num_bytes);
-                    self.pending_frame_data.clear();
-                } else {
-                    panic!("new frame header sent, but the last frame has not been completed");
-                }
-                self.pending_frame_data.extend_from_slice(&packet.data);
-                self.attempt_decode();
-            }
-            PacketMetadata::FrameData => {
-                self.pending_frame_data.extend_from_slice(&packet.data);
-                self.attempt_decode();
-            }
-        }
-    }
-
-    pub fn frames(&mut self) -> impl Iterator<Item = RgbImage> + '_ {
-        self.pending_frames.drain(..)
-    }
-
-    pub fn next_frame(&mut self) -> Option<RgbImage> {
-        if self.pending_frames.is_empty() {
-            None
-        } else {
-            Some(self.pending_frames.remove(0))
-        }
-    }
-}
-
-/// if `Decoder == Ready`, this means there are frames ready to consume
-pub struct Ready;
-
-impl PartialEq<Ready> for Decoder {
-    fn eq(&self, _: &Ready) -> bool {
-        !self.pending_frames.is_empty()
-    }
-}
