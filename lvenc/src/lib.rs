@@ -1,43 +1,31 @@
-mod imageiter;
 mod utils;
 
-extern crate anyhow;
-extern crate array2d;
-extern crate bitvec;
-extern crate image;
-extern crate opencv;
-extern crate thiserror;
-
-use anyhow::Result;
 use array2d::Array2D;
 use bitvec::prelude::*;
-use cv::prelude::*;
-use cv::videoio::VideoCapture;
 use image::{Rgb, RgbImage};
-use opencv as cv;
-use std::io::Write;
-use std::path::PathBuf;
-use std::time::Instant;
-use std::fs::OpenOptions;//, hint::unreachable_unchecked};
-use utils::mat_to_image;
-
-trait U8Diff {
-    fn diff(&self, other: u8) -> i16;
-}
-
-impl U8Diff for u8 {
-    fn diff(&self, other: u8) -> i16 {
-        (*self as i16) - (other as i16)
-    }
-}
+use utils::*;
 
 /// returns if the difference between two `Rgb` pixels is 'small' and not all non-zero
-pub fn pix_small_difference(px1: Rgb<u8>, px2: Rgb<u8>) -> bool {
+fn pix_small_difference(px1: Rgb<u8>, px2: Rgb<u8>) -> bool {
+    // 1 + 2 + 4 + 8 = 15
     const ACCEPTABLE: i16 = 15; // 4 bit + one for signedness
-    (px1.0[0].diff(px2.0[0]).abs() <= ACCEPTABLE
-        && px1.0[1].diff(px2.0[1]).abs() <= ACCEPTABLE
-        && px1.0[2].diff(px2.0[2]).abs() <= ACCEPTABLE)
-        && (px1.0[0] != 0 || px1.0[0] != 0 || px1.0[0] != 0)
+    px1.0[0].abs_dist(px2.0[0]) <= ACCEPTABLE
+    && px1.0[1].abs_dist(px2.0[1]) <= ACCEPTABLE
+    && px1.0[2].abs_dist(px2.0[2]) <= ACCEPTABLE
+    && px1 != px2
+}
+
+#[test]
+fn test_pix_small_diff() {
+    let px1 = Rgb([10, 21, 100]);
+    let px2 = Rgb([25, 20, 100]);
+    assert!(pix_small_difference(px1, px2));
+    let px1 = Rgb([10, 21, 255]);
+    let px2 = Rgb([10, 21, 255]);
+    assert!(!pix_small_difference(px1, px2));
+    let px1 = Rgb([10, 21, 116]);
+    let px2 = Rgb([25, 20, 100]);
+    assert!(!pix_small_difference(px1, px2));
 }
 
 /// get the bit at the provided index
@@ -48,10 +36,17 @@ pub const fn bit(byte: u8, bit: u8) -> bool {
     byte >> bit & 1 == 1
 }
 
+#[test]
+fn test_get_bit() {
+    let byte = 1u8;
+    let bit_val = bit(byte, 0);
+    assert_eq!(true, bit_val);
+}
+
 /// sets the bit at the provided index
 ///
 /// bit 0 is least significant, bit 7 is most significant
-pub fn set_bit(byte: &mut u8, bit_id: u8, bit_v: bool) {
+fn set_bit(byte: &mut u8, bit_id: u8, bit_v: bool) {
     debug_assert!(bit_id <= 7);
     // dbg!(&byte);
     *byte &= (1 >> bit_id) ^ u8::MAX;
@@ -95,7 +90,7 @@ fn test_collect_byte() {
     assert_eq!(Some(126), collect_byte(&mut iter));
 }
 
-fn collect_i4(iter: &mut bitvec::boxed::IntoIter<u8, Lsb0>) -> Option<i8> {
+pub fn collect_i4(iter: &mut bitvec::boxed::IntoIter<u8, Lsb0>) -> Option<i8> {
     if iter.len() < 5 {
         return None;
     }
@@ -108,24 +103,42 @@ fn collect_i4(iter: &mut bitvec::boxed::IntoIter<u8, Lsb0>) -> Option<i8> {
     for (i, b) in bits.into_iter().enumerate() {
         set_bit(&mut res, i as u8, b);
     }
-    let mut signed_res = i8::try_from(res).unwrap();
+    let mut signed_res = i8::try_from(/* TODO please god no please god why */if is_neg {16 - res} else {res}).unwrap();
     if is_neg {
         signed_res = -signed_res;
     }
     Some(signed_res)
 }
 
-fn serialize_i4(target: &mut BitVec<u8, Lsb0>, x: i8) {
+pub fn serialize_i4(target: &mut BitVec<u8, Lsb0>, x: i8) {
     target.push(x.is_negative());
     for i in 0u8..4u8 {
         target.push(bit(x as u8, i));
     }
 }
 
+#[test]
+fn test_i4_encoding() {
+    let mut fail = false;
+    for i in -15i8..=15i8 {
+        println!("testing {i}");
+        let mut bv = BitVec::<u8, Lsb0>::new();
+        serialize_i4(&mut bv, i);
+        // assert_eq!(Some(i), collect_i4(&mut bv.into_iter()));
+        let collected = collect_i4(&mut bv.into_iter()).unwrap();
+        if i != collected {
+            fail = true;
+            println!("Fail: {} != {}", i, collected);
+        }
+    }
+    if fail {
+        panic!("Failed");
+    }
+}
 
 //AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAa
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum IntermediatePixelNonPointerOrSameAsLast {
+pub enum IntermediatePixelNonPointerOrSameAsLast {
     Pixel([u8; 3]),
     /// even though it is a i8, treat this as a i4. for qualification, use the [`pix_small_difference`] function
     SmallChange {
@@ -144,7 +157,7 @@ impl IntermediatePixelNonPointerOrSameAsLast {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum IntermediatePixelNonPointer {
+pub enum IntermediatePixelNonPointer {
     /// same as last may not point to a pointer, as that would be b a d, nor can it point to another SameAsLast,
     /// but it kinda can since the SameAsLast is processed before the check happens
     SameAsLast(IntermediatePixelNonPointerOrSameAsLast),
@@ -152,7 +165,7 @@ enum IntermediatePixelNonPointer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum IntermediatePixel {
+pub enum IntermediatePixel {
     Pointer {
         /// 1 is up, 0 is left
         direction: bool,
@@ -164,7 +177,7 @@ enum IntermediatePixel {
 
 /// 1 is up, 0 is left
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Pointer {
+pub enum Pointer {
     Repeat(u8, bool),
     Series(Vec<bool>), // len MUST NOT exceed 255
 }
@@ -179,7 +192,7 @@ enum SingleRepType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RepType {
+pub enum RepType {
     SameAsLast(u8),
     Pixels(Vec<[u8; 3]>), // len MUST NOT exceed 255
     SmallChange(Vec<[i8; 3]>),
@@ -214,7 +227,8 @@ impl RepType {
                 // number of pixels
                 res.extend_from_raw_slice(&[u8::try_from(pixels.len()).expect("pixels len must be less than 255")]);
                 // pixels
-                pixels.into_iter().flatten().for_each(|d_rgb| {
+
+                pixels.into_iter().map(|i| { if i == [0; 3] {panic!()} else {i}}).flatten().for_each(|d_rgb| {
                     serialize_i4(&mut res, d_rgb);
                 });
             }
@@ -296,7 +310,7 @@ impl RepType {
 #[allow(unused)]
 const SPEC: () = ();
 
-fn serialize_stage_0(
+pub fn serialize_stage_0(
     last_img: &RgbImage,
     img: &RgbImage,
 ) -> Array2D<Option<IntermediatePixelNonPointerOrSameAsLast>> {
@@ -315,7 +329,6 @@ fn serialize_stage_0(
                 x as usize,
                 Some({
                     if pix_small_difference(last_pix, *pix) {
-                        // println!("{:?} {:?}", last_pix, pix);
                         IntermediatePixelNonPointerOrSameAsLast::SmallChange {
                             change: [
                                 i8::try_from(last_pix.0[0] as i16 - pix.0[0] as i16).unwrap(),
@@ -337,7 +350,7 @@ fn serialize_stage_0(
     intermediate_arr
 }
 
-fn serialize_stage_1(
+pub fn serialize_stage_1(
     last: Option<Array2D<Option<IntermediatePixelNonPointerOrSameAsLast>>>,
     current: Array2D<Option<IntermediatePixelNonPointerOrSameAsLast>>,
 ) -> Array2D<Option<IntermediatePixelNonPointer>> {
@@ -373,7 +386,7 @@ fn serialize_stage_1(
     intermediate_arr
 }
 
-fn serialize_stage_2(
+pub fn serialize_stage_2(
     current: Array2D<Option<IntermediatePixelNonPointer>>,
 ) -> Array2D<Option<IntermediatePixel>> {
     let mut intermediate_arr: Array2D<Option<IntermediatePixel>> =
@@ -424,7 +437,7 @@ fn serialize_stage_2(
     intermediate_arr
 }
 
-fn display_stage_2(stage_2: &Array2D<Option<IntermediatePixel>>) -> RgbImage {
+pub fn display_stage_2(stage_2: &Array2D<Option<IntermediatePixel>>) -> RgbImage {
     RgbImage::from_fn(
         stage_2.num_columns() as u32,
         stage_2.num_rows() as u32,
@@ -449,7 +462,7 @@ fn display_stage_2(stage_2: &Array2D<Option<IntermediatePixel>>) -> RgbImage {
     )
 }
 
-fn serialize_stage_3(
+pub fn serialize_stage_3(
     stage_2: Array2D<Option<IntermediatePixel>>
 ) -> Vec<IntermediatePixel> {
     stage_2.elements_row_major_iter()
@@ -459,7 +472,7 @@ fn serialize_stage_3(
         .collect()
 }
 
-fn serialize_stage_4(
+pub fn serialize_stage_4(
     stage_3: Vec<IntermediatePixel>
 ) -> Vec<RepType> {
     let mut iterator = stage_3.into_iter();
@@ -576,7 +589,7 @@ fn serialize_stage_4(
     res
 }
 
-fn serialize_stage_5(
+pub fn serialize_stage_5(
     stage_4: Vec<RepType>
 ) -> Vec<u8> {
     let mut res = BitVec::<u8, Lsb0>::new();
@@ -681,7 +694,8 @@ impl Decoder {
             let mut frame_data = self.pending_frame_data.drain(0..bytes_for_next_frame).collect::<BitVec<u8, Lsb0>>().into_iter();
             let mut decoded_reptypes: Vec<RepType> = vec![];
 
-            while frame_data.len() != 0 {
+            while frame_data.len() >= 8 {
+                // println!("{}", frame_data.len());
                 match (frame_data.next().unwrap(), frame_data.next().unwrap()) {
                     (false, false) => {
                         let num_of_same = collect_byte(&mut frame_data).unwrap();
@@ -772,9 +786,10 @@ impl Decoder {
                         }
                         SingleRepType::SmallChange(change) => {
                             let at = frame.get_pixel_mut(col as u32, row as u32);
-                            at.0[0] = (at.0[0] as i8 + change[0]) as u8;
-                            at.0[1] = (at.0[1] as i8 + change[1]) as u8;
-                            at.0[2] = (at.0[2] as i8 + change[2]) as u8;
+                            println!("{:?} + {:?}", at.0, change);
+                            at.0[0] = u8::try_from(i16::from(at.0[0]) + i16::from(change[0])).unwrap();
+                            at.0[1] = u8::try_from(i16::from(at.0[1]) + i16::from(change[1])).unwrap();
+                            at.0[2] = u8::try_from(i16::from(at.0[2]) + i16::from(change[2])).unwrap();
                         }
                         SingleRepType::SameAsLast => {/* hehe */}
                     }
@@ -783,6 +798,7 @@ impl Decoder {
 
             self.last_frame = Some(frame.clone());
             self.pending_frames.push(frame);
+            self.bytes_for_next_frame = None;
         }
     }
 
@@ -813,77 +829,21 @@ impl Decoder {
     pub fn frames(&mut self) -> impl Iterator<Item = RgbImage> + '_ {
         self.pending_frames.drain(..)
     }
+
+    pub fn next_frame(&mut self) -> Option<RgbImage> {
+        if self.pending_frames.is_empty() {
+            None
+        } else {
+            Some(self.pending_frames.remove(0))
+        }
+    }
 }
 
-pub fn test_for(vid: PathBuf, out_dir: &str) -> Result<()> {
-    let mut cap = VideoCapture::from_file(vid.to_str().unwrap(), cv::videoio::CAP_ANY)?;
+/// if `Decoder == Ready`, this means there are frames ready to consume
+pub struct Ready;
 
-    let (before_img_path, stage_two_path, out_file) = {
-        let mut out_dir = PathBuf::from(out_dir);
-        out_dir.push(PathBuf::from(vid).file_name().unwrap());
-
-        if !out_dir.exists() {
-            std::fs::create_dir(&out_dir)?;
-        }
-
-        let mut before_img_path = out_dir.clone();
-        before_img_path.push("before.png");
-
-        let mut stage_two_path = out_dir.clone();
-        stage_two_path.push("out.bmp");
-
-        let mut out_file = out_dir.clone();
-        out_file.push("out.bin");
-
-        (before_img_path, stage_two_path, out_file)
-    };
-
-    let mut frame1 = Mat::default();
-    let mut frame2 = Mat::default();
-
-    assert!(cap.read(&mut frame1)?);
-    assert!(!frame1.empty());
-    assert!(cap.read(&mut frame2)?);
-    assert!(!frame2.empty());
-
-    mat_to_image(&frame2)?.save(before_img_path)?;
-
-    let before_pt1 = Instant::now();
-
-    let pt0_old = serialize_stage_0(
-        &RgbImage::from_pixel(
-            frame1.size().unwrap().width as u32,
-            frame1.size().unwrap().height as u32,
-            Rgb([0; 3]),
-        ),
-        &mat_to_image(&frame1).unwrap(),
-    );
-    let pt0 = serialize_stage_0(
-        &mat_to_image(&frame1).unwrap(),
-        &mat_to_image(&frame2).unwrap(),
-    );
-    let pt1 = serialize_stage_1(Some(pt0_old), pt0);
-    let pt2 = serialize_stage_2(pt1);
-
-    let after_pt1 = Instant::now();
-    let before_pt2 = Instant::now();
-
-    let pt3 = serialize_stage_3(pt2.clone());
-    let pt4 = serialize_stage_4(pt3);
-    let pt5 = serialize_stage_5(pt4);
-
-    let after_pt2 = Instant::now();
-
-    println!("Serialization pt 1 took {:?}", (after_pt1 - before_pt1) + (after_pt2 - before_pt2));
-
-    display_stage_2(&pt2).save(stage_two_path).unwrap();
-
-    OpenOptions::new().create(true).write(true).open(out_file)?.write_all(&pt5)?;
-
-    println!(
-        "minimum time to do one frame at 60fps is {}ms",
-        1f64 / 60f64 * 1000f64
-    );
-
-    Ok(())
+impl PartialEq<Ready> for Decoder {
+    fn eq(&self, _: &Ready) -> bool {
+        !self.pending_frames.is_empty()
+    }
 }

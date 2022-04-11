@@ -11,15 +11,17 @@ members = [
 ]
 
 [dependencies]
-image = "0.23"
-opencv = "0.62"
+opencv = "0.63"
+image = "0.24"
 thiserror = "1.0"
-serde = {version="1.0", features=["derive"]}
-bincode = "1.3.3"
-bytes = "1.1.0"
-bitvec = "0.22.3"
-array2d = "0.2.1"
 anyhow = "1.0.55"
+array2d = "0.2.1"
+bitvec = "1.0"
+serde = {version="1.0", features=["derive"]}
+shrinkwraprs = "0.3.0"
+stati = "0.11.0-beta"
+bincode = "1.3"
+bytes = "1.1.0"
 
 [dependencies.lvenc]
 path = "lvenc"
