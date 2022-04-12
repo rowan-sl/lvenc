@@ -9,8 +9,8 @@ use bitvec::prelude::*;
 pub use decoder::{Decoder, Ready};
 use grid::Grid;
 use image::{Rgb, RgbImage};
-use packet::*;
-use utils::*;
+pub use packet::*;
+// use utils::*;
 
 ///& old encoding
 /// is rep
@@ -39,9 +39,12 @@ use utils::*;
 ///                                this is generic over every single other pixel type except iself, so when encoding it should be treated as so,
 ///                                added in as part of the last step, and compared to the previous image right before the last step. */
 ///     pixels(num: u8,) /* folowed by `num` pixels ([u8; 3]) */
-///     small_change(num: u8,) /* folowed by `num` small scale pixel changes ([i4; 3] vs [u8; 3] or 15 bits vs 24 bits).
-///                                 if this is applicable can be determined using the `pix_small_difference` function
-///                                 i4 is represented as (sign + first 4 bits of i8 as u8*/
+///! removed
+///! TODO add a 4th case or remove one of the first cases, to improve encoding
+///! NOTE: this was removed because it was way too slow and not that good?
+///!     small_change(num: u8,) /* folowed by `num` small scale pixel changes ([i4; 3] vs [u8; 3] or 15 bits vs 24 bits).
+///!                                 if this is applicable can be determined using the `pix_small_difference` function
+///!                                 i4 is represented as (sign + first 4 bits of i8 as u8*/
 ///     pointer(type: u1): /* pointer to another pixel, type determines the folowing variant */
 ///         repeat(num: u8, direction: u1,) /* `num` repetitions of pointer `direction` */
 ///         series(num: u8,) /* folowed by [u1; `num`] pointers */
@@ -70,11 +73,6 @@ pub enum IntermediatePixel {
     /// but it kinda can since the SameAsLast is processed before the check happens
     SameAsLast([u8; 3]),
     Pixel([u8; 3]),
-    /// even though it is a i8, treat this as a i4. for qualification, use the [`pix_small_difference`] function
-    SmallChange {
-        change: [i8; 3],
-        new: [u8; 3],
-    },
 }
 
 impl IntermediatePixel {
@@ -82,7 +80,6 @@ impl IntermediatePixel {
         match self {
             Self::SameAsLast(x) => x,
             Self::Pixel(x) => x,
-            Self::SmallChange { new, .. } => new,
             Self::Pointer { target, .. } => target,
         }
     }
@@ -99,7 +96,6 @@ pub enum Pointer {
 enum SingleRepType {
     SameAsLast,
     Pixel([u8; 3]),
-    SmallChange([i8; 3]),
     /// 1 is up, 0 is left
     Pointer(bool),
 }
@@ -108,7 +104,6 @@ enum SingleRepType {
 pub enum RepType {
     SameAsLast(u8),
     Pixels(Vec<[u8; 3]>), // len MUST NOT exceed 255
-    SmallChange(Vec<[i8; 3]>),
     Pointer(Pointer),
 }
 
@@ -132,24 +127,6 @@ impl RepType {
                 ]);
                 // pixels
                 res.extend_from_raw_slice(&pixels.into_iter().flatten().collect::<Vec<u8>>());
-            }
-            Self::SmallChange(pixels) => {
-                // res_type
-                res.push(false);
-                res.push(true);
-                // number of pixels
-                res.extend_from_raw_slice(&[
-                    u8::try_from(pixels.len()).expect("pixels len must be less than 255")
-                ]);
-                // pixels
-
-                pixels
-                    .into_iter()
-                    .map(|i| if i == [0; 3] { panic!() } else { i })
-                    .flatten()
-                    .for_each(|d_rgb| {
-                        serialize_i4(res, d_rgb);
-                    });
             }
             Self::Pointer(ptr) => {
                 // res_type
@@ -188,7 +165,7 @@ pub unsafe fn serialize_stage_0(
     let mut res = Grid::<MaybeUninit<IntermediatePixel>>::filled_with(image_size.0 as usize, image_size.1 as usize, MaybeUninit::uninit());
 
     'pxl_loop: for ((x, y, next), (_, _, last)) in img.enumerate_pixels().zip(last_img.enumerate_pixels()) {
-        for (o_x, o_y, i) in [(x.saturating_sub(1), y, 0), (x, y.saturating_sub(1), 1)] {
+        for (o_x, o_y, i) in [(x.saturating_sub(1), y, false), (x, y.saturating_sub(1), true)] {
             if o_x == x && o_y == y {
                 continue;
             }
@@ -200,7 +177,7 @@ pub unsafe fn serialize_stage_0(
                     x as usize,
                     y as usize,
                     MaybeUninit::new(IntermediatePixel::Pointer {
-                        direction: i == 1,
+                        direction: i,
                         target: at_other.into_inner(),
                     }),
                 );
@@ -212,23 +189,12 @@ pub unsafe fn serialize_stage_0(
             if *last == *next {
                 IntermediatePixel::SameAsLast(last.0)
             } else {
-                if pix_small_difference(*last, *next) {
-                    IntermediatePixel::SmallChange {
-                        change: [
-                            (next.0[0] as i16 - last.0[0] as i16) as i8,
-                            (next.0[1] as i16 - last.0[1] as i16) as i8,
-                            (next.0[2] as i16 - last.0[2] as i16) as i8,
-                        ],
-                        new: next.0,
-                    }
-                } else {
-                    IntermediatePixel::Pixel([next.0[0], next.0[1], next.0[2]])
-                }
+                IntermediatePixel::Pixel([next.0[0], next.0[1], next.0[2]])
             }
         ));
     }
 
-    res.transform_into(|i| unsafe { i.assume_init() })
+    res.transform_into(|i| i.assume_init())
 }
 
 pub fn display_stage_2(stage_2: &Grid<IntermediatePixel>) -> RgbImage {
@@ -254,9 +220,6 @@ pub fn serialize_stage_4(stage_3: Grid<IntermediatePixel>) -> Vec<u8> {
     let mut current: RepType = match iterator.next().unwrap() {
         IntermediatePixel::SameAsLast(..) => RepType::SameAsLast(1),
         IntermediatePixel::Pixel(px) => RepType::Pixels(vec![px]),
-        IntermediatePixel::SmallChange { change, .. } => {
-            RepType::SmallChange(vec![change])
-        }
         IntermediatePixel::Pointer { .. } => unreachable!(),
     };
 
@@ -279,10 +242,7 @@ pub fn serialize_stage_4(stage_3: Grid<IntermediatePixel>) -> Vec<u8> {
                                 //TODO make this a real value
                                 if *count < 10 {
                                     // less than some ammount of repetitions, so it is better just to switch over to a series variant instead
-                                    let mut ptrs = vec![];
-                                    for _ in 0..*count {
-                                        ptrs.push(*c_dir);
-                                    }
+                                    let mut ptrs = vec![*c_dir; *count as usize];
                                     ptrs.push(direction);
                                     current = RepType::Pointer(Pointer::Series(ptrs));
                                 } else {
@@ -330,19 +290,6 @@ pub fn serialize_stage_4(stage_3: Grid<IntermediatePixel>) -> Vec<u8> {
                 } else {
                     current.serialize(&mut ser);
                     current = RepType::Pixels(vec![pixel]);
-                }
-            }
-            IntermediatePixel::SmallChange { change, .. } => {
-                if let RepType::SmallChange(ref mut changes) = current {
-                    if changes.len() == 255 {
-                        current.serialize(&mut ser);
-                        current = RepType::SmallChange(vec![change]);
-                    } else {
-                        changes.push(change);
-                    }
-                } else {
-                    current.serialize(&mut ser);
-                    current = RepType::SmallChange(vec![change]);
                 }
             }
         }

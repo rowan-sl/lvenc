@@ -51,15 +51,7 @@ impl Decoder {
                         decoded_reptypes.push(RepType::Pixels(pixels));
                     }
                     (false, true) => {
-                        let mut changes = vec![];
-                        for _ in 0..collect_byte(&mut frame_data) {
-                            changes.push([
-                                collect_i4(&mut frame_data),
-                                collect_i4(&mut frame_data),
-                                collect_i4(&mut frame_data),
-                            ]);
-                        }
-                        decoded_reptypes.push(RepType::SmallChange(changes));
+                        unreachable!();
                     }
                     (true, true) => {
                         if frame_data.next().unwrap() {
@@ -89,10 +81,6 @@ impl Decoder {
                         RepType::Pixels(pixels) => pixels
                             .into_iter()
                             .map(|i| SingleRepType::Pixel(i))
-                            .collect::<Vec<_>>(),
-                        RepType::SmallChange(changes) => changes
-                            .into_iter()
-                            .map(|i| SingleRepType::SmallChange(i))
                             .collect::<Vec<_>>(),
                         RepType::SameAsLast(num) => std::iter::repeat(SingleRepType::SameAsLast)
                             .take(num as usize)
@@ -126,13 +114,6 @@ impl Decoder {
                         } else {
                             *frame.get_pixel_mut(x as u32 - 1, y as u32)
                         };
-                    }
-                    SingleRepType::SmallChange(change) => {
-                        let at = frame.get_pixel_mut(x as u32, y as u32);
-                        // println!("{:?} + {:?}", at.0, change);
-                        at.0[0] = u8::try_from(i16::from(at.0[0]) + i16::from(change[0])).unwrap();
-                        at.0[1] = u8::try_from(i16::from(at.0[1]) + i16::from(change[1])).unwrap();
-                        at.0[2] = u8::try_from(i16::from(at.0[2]) + i16::from(change[2])).unwrap();
                     }
                     SingleRepType::SameAsLast => { /* hehe */ }
                 }
